@@ -5,6 +5,9 @@ import torch
 import torch.nn.functional as F
 import onnx
 import onnxsim
+import os
+from onnxconverter_common import float16
+import openvino as ov
 
 from modules.xfeat import XFeat
 
@@ -92,7 +95,7 @@ def parse_args():
     parser.add_argument(
         "--export_path",
         type=str,
-        default="./model.onnx",
+        default="../onnx_weights/extractor.onnx",
         help="Path to export ONNX model.",
     )
     parser.add_argument(
@@ -106,18 +109,18 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    if args.dynamic:
-        args.height = 640
-        args.width = 640
-    else:
-        assert args.height % 32 == 0 and args.width % 32 == 0, "Height and width must be multiples of 32."
+    # if args.dynamic:
+    #     args.height = 640
+    #     args.width = 640
+    # else:
+    #     assert args.height % 32 == 0 and args.width % 32 == 0, "Height and width must be multiples of 32."
 
     if args.top_k > 4800:
         print("Warning: The current maximum supported value for TopK in TensorRT is 3840, which coincidentally equals 4800 * 0.8. Please ignore this warning if TensorRT will not be used in the future.")
 
-    batch_size = 2
-    x1 = torch.randn(batch_size, 3, args.height, args.width, dtype=torch.float32, device='cpu')
-    x2 = torch.randn(batch_size, 3, args.height, args.width, dtype=torch.float32, device='cpu')
+    batch_size = 1
+    x1 = torch.randn(batch_size, 1, args.height, args.width, device='cpu')
+    x2 = torch.randn(batch_size, 1, args.height, args.width, device='cpu')
 
     xfeat = XFeat()
     xfeat.top_k = args.top_k
@@ -189,25 +192,37 @@ if __name__ == "__main__":
             dynamic_axes=dynamic_axes if args.dynamic else None,
         )
     else:
-        xfeat.forward = xfeat.match_xfeat_star
-        dynamic_axes = {"images0": {0: "batch", 2: "height", 3: "width"}, "images1": {0: "batch", 2: "height", 3: "width"}}
+        # xfeat.forward = xfeat.match_xfeat_star
+        # dynamic_axes = {"images0": {0: "batch", 2: "height", 3: "width"}, "images1": {0: "batch", 2: "height", 3: "width"}}
         torch.onnx.export(
-            xfeat,
-            (x1, x2),
+            xfeat.net,
+            x1,
             args.export_path,
             verbose=False,
             opset_version=args.opset,
-            do_constant_folding=True,
-            input_names=["images0", "images1"],
-            output_names=["matches", "batch_indexes"],
-            dynamic_axes=dynamic_axes if args.dynamic else None,
+            do_constant_folding=False,
+            input_names=["im"],
+            output_names=["feats", "keypoints", "heatmaps"]
         )
 
     model_onnx = onnx.load(args.export_path)  # load onnx model
     onnx.checker.check_model(model_onnx)  # check onnx model
 
     model_onnx, check = onnxsim.simplify(model_onnx)
+    model_onnx = float16.convert_float_to_float16(model_onnx)
     assert check, "assert check failed"
     onnx.save(model_onnx, args.export_path)
 
     print(f"Model exported to {args.export_path}")
+
+    # print("Exporting ONNX model to IR... This may take a few minutes.")
+    # ov_model = ov.convert_model(args.export_path)
+    # ov.save_model(ov_model, "xfeat.xml", compress_to_fp16=True)
+
+    # import blobconverter
+
+    # blobconverter.from_onnx(
+    #     model="./onnx_weights/xfeat.onnx",
+    #     data_type="FP16",
+    #     shaves=4,
+    # )
