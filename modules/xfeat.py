@@ -275,13 +275,10 @@ class XFeat(nn.Module):
 
 		idxs0, idxs1 = self.match(out1['descriptors'], out2['descriptors'], min_cossim=min_cossim )
 
-		if torch.onnx.is_in_onnx_export():
-			return out1['keypoints'][idxs0], out2['keypoints'][idxs1], out1['keypoints'], out2['keypoints']
 		return (
 			out1['keypoints'][idxs0].cpu().numpy(), 
 			out2['keypoints'][idxs1].cpu().numpy(),
-			np.delete(out1['keypoints'].cpu().numpy(), idxs0, axis=0), 
-			np.delete(out2['keypoints'].cpu().numpy(), idxs1, axis=0)
+			out2
 			)
 	
 	@torch.inference_mode()
@@ -309,12 +306,11 @@ class XFeat(nn.Module):
 		return (
 			out1['keypoints'][idxs0].cpu().numpy(), 
 			out2['keypoints'][idxs1].cpu().numpy(),
-			out1['keypoints'].cpu().numpy(), 
-			out2['keypoints'].cpu().numpy()
-			)
+			out2
+		)
 	
 	@torch.inference_mode()
-	def track_keypoints_xfeat_fe(self, prev_out1, data2, min_cossim = -1):
+	def track_keypoints_xfeat_fe(self, prev_out1, data2, min_cossim = 0.5):
 		"""
 			Simple extractor and MNN matcher.
 			For simplicity it does not support batched mode due to possibly different number of kpts.
@@ -327,15 +323,15 @@ class XFeat(nn.Module):
 		"""
 		# img1 = self.parse_input(img1)
 		# img2 = self.parse_input(img2)
-		out2 = self.detectAndCompute(data2)[0]
-
-		idxs0, idxs1 = self.match(prev_out1['descriptors'], out2['descriptors'], min_cossim=min_cossim )
+		out2 = self.detectAndCompute(data2)
+		idxs0, idxs1 = self.match(
+			prev_out1[0]['descriptors'], out2[0]['descriptors'], 
+			min_cossim=min_cossim)
 
 		return (
-			prev_out1['keypoints'][idxs0].cpu().numpy(), 
-			out2['keypoints'][idxs1].cpu().numpy(),
-			np.delete(prev_out1['keypoints'].cpu().numpy(), idxs0, axis=0), 
-			np.delete(out2['keypoints'].cpu().numpy(), idxs1, axis=0)
+				prev_out1[0]['keypoints'][idxs0].cpu().numpy(), 
+				out2[0]['keypoints'][idxs1].cpu().numpy(),
+				out2
 			)
 
 	@torch.inference_mode()
@@ -364,15 +360,46 @@ class XFeat(nn.Module):
 		#Refine coarse matches
 		match_mkpts, batch_index = self.refine_matches(out1, out2, idx0_b, idx1_b, fine_conf = 0.25)
 
-		if torch.onnx.is_in_onnx_export():
-			return match_mkpts, batch_index
-
 		B = im_set1.shape[0]
 		matches = []
 		for b in range(B):
 			matches.append(match_mkpts[batch_index == b, :])
 
 		return matches if B > 1 else (matches[0][:, :2].cpu().numpy(), matches[0][:, 2:].cpu().numpy())
+
+	@torch.inference_mode()
+	def track_keypoints_xfeat_star_fe(self, prev_out1, im_set2):
+		"""
+			Extracts coarse feats, then match pairs and finally refine matches, currently supports batched mode.
+			input:
+				im_set1 -> torch.Tensor(B, C, H, W) or np.ndarray (H,W,C): grayscale or rgb images.
+				im_set2 -> torch.Tensor(B, C, H, W) or np.ndarray (H,W,C): grayscale or rgb images.
+				top_k -> int: keep best k features
+			returns:
+				matches -> List[torch.Tensor(N, 4)]: List of size B containing tensor of pairwise matches (x1,y1,x2,y2)
+		"""
+		#Compute coarse feats
+		out2 = self.detectAndComputeDense(im_set2)
+
+		#Match batches of pairs
+		idx0_b, idx1_b = self.batch_match(
+			prev_out1['descriptors'], out2['descriptors'])
+		# print(idx0_b.shape)
+		# print(idx1_b.shape)
+
+		#Refine coarse matches
+		match_mkpts, batch_index = self.refine_matches(
+			prev_out1, out2, idx0_b, idx1_b)
+
+		B = im_set2.shape[0]
+		matches = []
+		for b in range(B):
+			matches.append(match_mkpts[batch_index == b, :])
+
+		return matches if B > 1 else (
+			matches[0][:, :2].cpu().numpy(), 
+			matches[0][:, 2:].cpu().numpy(), 
+			out2)
 
 	def preprocess_tensor(self, x):
 		""" Guarantee that image is divisible by 32 to avoid aliasing artifacts. """
@@ -454,20 +481,20 @@ class XFeat(nn.Module):
 
 		return coords
 
-	def refine_matches(self, d0, d1, idx0_b, idx1_b, fine_conf = 0.25):
-		if torch.onnx.is_in_onnx_export():
-			# Improve compatibility when opset is less than 14
-			feats1 = d0['descriptors'].flatten(0, 1)[idx0_b[:, 0] * d0['descriptors'].shape[1] + idx0_b[:, 1]]
-			feats2 = d1['descriptors'].flatten(0, 1)[idx1_b[:, 0] * d1['descriptors'].shape[1] + idx1_b[:, 1]]
-			mkpts_0 = d0['keypoints'].flatten(0, 1)[idx0_b[:, 0] * d0['keypoints'].shape[1] + idx0_b[:, 1]]
-			mkpts_1 = d1['keypoints'].flatten(0, 1)[idx1_b[:, 0] * d1['keypoints'].shape[1] + idx1_b[:, 1]]
-			sc0 = d0['scales'].flatten(0, 1)[idx0_b[:, 0] * d0['scales'].shape[1] + idx0_b[:, 1]]
-		else:
-			feats1 = d0['descriptors'][idx0_b[:, 0], idx0_b[:, 1]]
-			feats2 = d1['descriptors'][idx1_b[:, 0], idx1_b[:, 1]]
-			mkpts_0 = d0['keypoints'][idx0_b[:, 0], idx0_b[:, 1]]
-			mkpts_1 = d1['keypoints'][idx1_b[:, 0], idx1_b[:, 1]]
-			sc0 = d0['scales'][idx0_b[:, 0], idx0_b[:, 1]]
+	def refine_matches(self, d0, d1, idx0_b, idx1_b, fine_conf = 0.5):
+		# if torch.onnx.is_in_onnx_export():
+		# 	# Improve compatibility when opset is less than 14
+		# 	feats1 = d0['descriptors'].flatten(0, 1)[idx0_b[:, 0] * d0['descriptors'].shape[1] + idx0_b[:, 1]]
+		# 	feats2 = d1['descriptors'].flatten(0, 1)[idx1_b[:, 0] * d1['descriptors'].shape[1] + idx1_b[:, 1]]
+		# 	mkpts_0 = d0['keypoints'].flatten(0, 1)[idx0_b[:, 0] * d0['keypoints'].shape[1] + idx0_b[:, 1]]
+		# 	mkpts_1 = d1['keypoints'].flatten(0, 1)[idx1_b[:, 0] * d1['keypoints'].shape[1] + idx1_b[:, 1]]
+		# 	sc0 = d0['scales'].flatten(0, 1)[idx0_b[:, 0] * d0['scales'].shape[1] + idx0_b[:, 1]]
+		# else:
+		feats1 = d0['descriptors'][idx0_b[:, 0], idx0_b[:, 1]]
+		feats2 = d1['descriptors'][idx1_b[:, 0], idx1_b[:, 1]]
+		mkpts_0 = d0['keypoints'][idx0_b[:, 0], idx0_b[:, 1]]
+		mkpts_1 = d1['keypoints'][idx1_b[:, 0], idx1_b[:, 1]]
+		sc0 = d0['scales'][idx0_b[:, 0], idx0_b[:, 1]]
 
 		#Compute fine offsets
 		offsets = self.net.fine_matcher(torch.cat([feats1, feats2],dim=-1))
@@ -479,11 +506,20 @@ class XFeat(nn.Module):
 		mask_good = conf > fine_conf
 		mkpts_0 = mkpts_0[mask_good]
 		mkpts_1 = mkpts_1[mask_good]
+		# feats2 = feats2[mask_good]
+		# sc0 = sc0[mask_good]
 
 		match_mkpts = torch.cat([mkpts_0, mkpts_1], dim=-1)
 		batch_index = idx0_b[mask_good, 0]
 
-		return match_mkpts, batch_index
+		return (match_mkpts, 
+			batch_index, 
+			# {
+			# 	"keypoints": mkpts_1.unsqueeze(0),
+			# 	"descriptors": feats2.unsqueeze(0),
+			# 	"scales": sc0.unsqueeze(0)
+			# }
+		)
 
 	@torch.inference_mode()
 	def match(self, feats1, feats2, min_cossim = 0.95):
