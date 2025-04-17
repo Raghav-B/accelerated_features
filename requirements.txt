@@ -1,5 +1,10 @@
+torch==2.6.0
+onnx==1.17.0
+onnxsim==0.4.36
+onnxconverter-common==1.14.0
+openvino==2025.1.0
+tqdm==4.67.1
 opencv-contrib-python-headless==4.10.0.84
 poselib
 kornia==0.7.2
-tqdm
 gdown

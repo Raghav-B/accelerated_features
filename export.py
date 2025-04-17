@@ -95,7 +95,7 @@ def parse_args():
     parser.add_argument(
         "--export_path",
         type=str,
-        default="../onnx_weights/extractor.onnx",
+        default="onnx_weights/extractor.onnx",
         help="Path to export ONNX model.",
     )
     parser.add_argument(
@@ -119,7 +119,7 @@ if __name__ == "__main__":
         print("Warning: The current maximum supported value for TopK in TensorRT is 3840, which coincidentally equals 4800 * 0.8. Please ignore this warning if TensorRT will not be used in the future.")
 
     batch_size = 1
-    x1 = torch.randn(batch_size, 1, args.height, args.width, device='cpu')
+    x1 = torch.randn(batch_size, 3, 320, 320, device='cpu')
     x2 = torch.randn(batch_size, 1, args.height, args.width, device='cpu')
 
     xfeat = XFeat()
