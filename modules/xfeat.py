@@ -239,8 +239,8 @@ class XFeat(nn.Module):
 			self.lighterglue = LighterGlue()
 
 		data = {
-				'keypoints0': d0['keypoints'][None, ...],
-				'keypoints1': d1['keypoints'][None, ...],
+				'keypoints0': d0['keypoints'][None, ...][:, :, :2],
+				'keypoints1': d1['keypoints'][None, ...][:, :, :2],
 				'descriptors0': d0['descriptors'][None, ...],
 				'descriptors1': d1['descriptors'][None, ...],
 				'image_size0': torch.tensor(d0['image_size']).to(self.dev)[None, ...],
