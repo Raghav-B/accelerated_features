@@ -10,6 +10,7 @@ from onnxconverter_common import float16
 import openvino as ov
 
 from modules.xfeat import XFeat
+from modules.lighterglue import LighterGlue
 
 
 class CustomInstanceNorm(torch.nn.Module):
@@ -84,7 +85,7 @@ def parse_args():
     parser.add_argument(
         "--top_k",
         type=int,
-        default=4800,
+        default=100,
         help="Keep best k features.",
     )
     parser.add_argument(
@@ -194,23 +195,62 @@ if __name__ == "__main__":
     else:
         # xfeat.forward = xfeat.match_xfeat_star
         # dynamic_axes = {"images0": {0: "batch", 2: "height", 3: "width"}, "images1": {0: "batch", 2: "height", 3: "width"}}
+        # torch.onnx.export(
+        #     xfeat.net,
+        #     x1,
+        #     args.export_path,
+        #     verbose=False,
+        #     opset_version=14,
+        #     do_constant_folding=False,
+        #     input_names=["im"],
+        #     output_names=["feats", "keypoints", "heatmaps"]
+        # )
+
+        lighterglue = LighterGlue()
+        lighterglue = lighterglue.cpu().eval()
+        lighterglue.dev = "cpu"
+
+        # import pickle
+
+        # with open("tensor.pkl", "rb") as f:
+            # dat = pickle.load(f)
+
+        img_size = torch.tensor((320, 320), dtype=torch.int32, device='cpu')
+        img_size = img_size.unsqueeze(-2)
+
+        data = {
+            'keypoints0': torch.zeros(1, args.top_k, 2, dtype=torch.float32, device='cpu'),
+            'keypoints1': torch.zeros(1, args.top_k, 2, dtype=torch.float32, device='cpu'),
+            'descriptors0': torch.randn(1, args.top_k, 64, dtype=torch.float32, device='cpu'),
+            'descriptors1': torch.randn(1, args.top_k, 64, dtype=torch.float32, device='cpu'),
+            'image_size0': img_size,
+            'image_size1': img_size,
+		}
+
+        # data = {
+        #     'keypoints0': dat["keypoints"].unsqueeze(-3)[:, :, :2],
+        #     'keypoints1': dat["keypoints"].unsqueeze(-3)[:, :, :2],
+        #     'descriptors0': dat['descriptors'].unsqueeze(-3),
+        #     'descriptors1': dat['descriptors'].unsqueeze(-3),
+        #     'image_size0': img_size,
+        #     'image_size1': img_size,
+		# }
+
         torch.onnx.export(
-            xfeat.net,
-            x1,
+            lighterglue,
+            (data, 0.1),
             args.export_path,
-            verbose=False,
-            opset_version=args.opset,
-            do_constant_folding=False,
-            input_names=["im"],
-            output_names=["feats", "keypoints", "heatmaps"]
+            dynamo=True,
+            input_names=["data", "min_conf"],
+            output_names=["matches"]
         )
 
     model_onnx = onnx.load(args.export_path)  # load onnx model
     onnx.checker.check_model(model_onnx)  # check onnx model
 
-    model_onnx, check = onnxsim.simplify(model_onnx)
+    # model_onnx, check = onnxsim.simplify(model_onnx)
     model_onnx = float16.convert_float_to_float16(model_onnx)
-    assert check, "assert check failed"
+    # assert check, "assert check failed"
     onnx.save(model_onnx, args.export_path)
 
     print(f"Model exported to {args.export_path}")

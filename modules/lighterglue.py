@@ -54,4 +54,8 @@ class LighterGlue(nn.Module):
         result = self.net( {   'image0': {'keypoints': data['keypoints0'], 'descriptors': data['descriptors0'], 'image_size': data['image_size0']},
                                'image1': {'keypoints': data['keypoints1'], 'descriptors': data['descriptors1'], 'image_size': data['image_size1']}  
                            } )
+
+        if torch.onnx.is_in_onnx_export():
+            return result["matches"]
+    
         return result
