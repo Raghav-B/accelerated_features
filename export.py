@@ -241,15 +241,19 @@ if __name__ == "__main__":
             (data, 0.1),
             args.export_path,
             dynamo=True,
-            input_names=["data", "min_conf"],
-            output_names=["matches"]
+            input_names=[
+                "keypoints0", "keypoints1", "descriptors0", "descriptors1", "image_size0", "image_size1"
+            ],
+            output_names=[
+                "log_assignment", "matches0", "matches1", "matching_scores0", "matching_scores1"
+            ],
         )
 
     model_onnx = onnx.load(args.export_path)  # load onnx model
     onnx.checker.check_model(model_onnx)  # check onnx model
 
     # model_onnx, check = onnxsim.simplify(model_onnx)
-    model_onnx = float16.convert_float_to_float16(model_onnx)
+    # model_onnx = float16.convert_float_to_float16(model_onnx)
     # assert check, "assert check failed"
     onnx.save(model_onnx, args.export_path)
 

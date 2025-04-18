@@ -55,7 +55,10 @@ class LighterGlue(nn.Module):
                                'image1': {'keypoints': data['keypoints1'], 'descriptors': data['descriptors1'], 'image_size': data['image_size1']}  
                            } )
 
-        if torch.onnx.is_in_onnx_export():
-            return result["matches"]
-    
-        return result
+        return {
+            "log_assignment": result["log_assignment"],
+            "matches0": result["matches0"],
+            "matches1": result["matches1"],
+            "matching_scores0": result["matching_scores0"],
+            "matching_scores1": result["matching_scores1"]
+        }
