@@ -54,4 +54,11 @@ class LighterGlue(nn.Module):
         result = self.net( {   'image0': {'keypoints': data['keypoints0'], 'descriptors': data['descriptors0'], 'image_size': data['image_size0']},
                                'image1': {'keypoints': data['keypoints1'], 'descriptors': data['descriptors1'], 'image_size': data['image_size1']}  
                            } )
-        return result
+
+        return {
+            "log_assignment": result["log_assignment"],
+            "matches0": result["matches0"],
+            "matches1": result["matches1"],
+            "matching_scores0": result["matching_scores0"],
+            "matching_scores1": result["matching_scores1"]
+        }

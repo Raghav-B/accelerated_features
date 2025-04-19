@@ -95,15 +95,106 @@ class XFeat(nn.Module):
 		#Correct kpt scale
 		mkpts = mkpts * torch.tensor([rw1,rh1], device=mkpts.device).view(1, 1, -1)
 
+		# valid = scores > 0
+		# return [  
+		# 		   {'keypoints': mkpts[b][valid[b]],
+		# 			'scores': scores[b][valid[b]],
+		# 			'descriptors': feats[b][valid[b]]} for b in range(B) 
+		# 	   ]
+	
+		pts = torch.cat((mkpts, scores.unsqueeze(-1)), dim=-1)
+
 		valid = scores > 0
 		return [  
-				   {'keypoints': mkpts[b][valid[b]],
-					'scores': scores[b][valid[b]],
+				   {'keypoints': pts[b][valid[b]],
 					'descriptors': feats[b][valid[b]]} for b in range(B) 
 			   ]
+	
+	@torch.inference_mode()
+	def detectAndComputeFrontEnd(self, data, rh1=1, rw1=1, _H1=640, _W1=640):
+		"""
+			Compute sparse keypoints & descriptors. Supports batched mode.
+
+			input:
+				x -> torch.Tensor(B, C, H, W): grayscale or rgb image
+				top_k -> int: keep best k features
+			return:
+				List[Dict]: 
+					'keypoints'    ->   torch.Tensor(N, 2): keypoints (x,y)
+					'scores'       ->   torch.Tensor(N,): keypoint scores
+					'descriptors'  ->   torch.Tensor(N, 64): local features
+		"""
+		M1,K1,H1 = data["M1"],data["K1"],data["H1"]
+		top_k = self.top_k
+		M1 = F.normalize(M1, dim=1)
+		B = 1
+
+		#Convert logits to heatmap and extract kpts
+		K1h = self.get_kpts_heatmap(K1)
+		mkpts = self.NMS(K1h, threshold=0.05, kernel_size=5)
+
+		#Compute reliability scores
+		_nearest = InterpolateSparse2d('nearest')
+		_bilinear = InterpolateSparse2d('bilinear')
+		scores = (_nearest(K1h, mkpts, _H1, _W1) * _bilinear(H1, mkpts, _H1, _W1)).squeeze(-1)
+		scores[torch.all(mkpts == 0, dim=-1)] = -1
+
+		#Select top-k features
+		idxs = torch.argsort(-scores)
+		mkpts_x  = torch.gather(mkpts[...,0], -1, idxs)[:, :top_k]
+		mkpts_y  = torch.gather(mkpts[...,1], -1, idxs)[:, :top_k]
+		mkpts = torch.cat([mkpts_x[...,None], mkpts_y[...,None]], dim=-1)
+		scores = torch.gather(scores, -1, idxs)[:, :top_k]
+
+		#Interpolate descriptors at kpts positions
+		feats = self.interpolator(M1, mkpts, H = _H1, W = _W1)
+
+		#L2-Normalize
+		feats = F.normalize(feats, dim=-1)
+
+		#Correct kpt scale
+		mkpts = mkpts * torch.tensor([rw1,rh1], device=mkpts.device).view(1, 1, -1)
+		pts = torch.cat((mkpts, scores.unsqueeze(-1)), dim=-1)
+
+		valid = scores > 0
+		return [  
+				   {'keypoints': pts[b][valid[b]],
+					'descriptors': feats[b][valid[b]]} for b in range(B) 
+			   ]
+	
 
 	@torch.inference_mode()
-	def detectAndComputeDense(self, x, top_k = None, multiscale = True):
+	def extract_feature(self, data, rh1=1, rw1=1, _H1=640, _W1=640):
+		B = 1
+		mkpts = data["keypoints"]
+		feats = self.interpolator(data["M1"], mkpts, H = _H1, W = _W1)
+		# L2-Normalize
+		feats = F.normalize(feats, dim=-1)
+
+		# Correct kpt scale
+		mkpts = mkpts * torch.tensor([rw1,rh1], device=mkpts.device).view(1, 1, -1)
+
+		return [  
+				   {'keypoints': mkpts[b],
+					'descriptors': feats[b]} for b in range(B) 
+			   ]
+	
+
+	@torch.inference_mode()
+	def match_xfeat_fe_kp(self, data1, data2, min_cossim = -1):
+		out1 = self.extract_feature(data1)[0]
+		out2 = self.extract_feature(data2)[0]
+
+		idxs0, idxs1 = self.match(
+			out1['descriptors'], out2['descriptors'], min_cossim=min_cossim )
+		
+		if torch.onnx.is_in_onnx_export():
+			return out1['keypoints'][idxs0], out2['keypoints'][idxs1]
+		return out1['keypoints'][idxs0].cpu().numpy(), out2['keypoints'][idxs1].cpu().numpy()
+
+
+	@torch.inference_mode()
+	def detectAndComputeDense(self, x, multiscale = True):
 		"""
 			Compute dense *and coarse* descriptors. Supports batched mode.
 
@@ -116,12 +207,14 @@ class XFeat(nn.Module):
 					'scales'       ->   torch.Tensor(top_k,): extraction scale
 					'descriptors'  ->   torch.Tensor(top_k, 64): coarse local features
 		"""
-		if top_k is None: top_k = self.top_k
 		if multiscale:
-			mkpts, sc, feats = self.extract_dualscale(x, top_k)
+			mkpts, sc, feats = self.extract_dualscale(x)
 		else:
-			mkpts, feats = self.extractDense(x, top_k)
+			mkpts, feats = self.extractDense(x, self.top_k)
 			sc = torch.ones(mkpts.shape[:2], device=mkpts.device)
+		
+		if torch.onnx.is_in_onnx_export():
+			return mkpts, feats, sc
 
 		return {'keypoints': mkpts,
 				'descriptors': feats,
@@ -146,8 +239,8 @@ class XFeat(nn.Module):
 			self.lighterglue = LighterGlue()
 
 		data = {
-				'keypoints0': d0['keypoints'][None, ...],
-				'keypoints1': d1['keypoints'][None, ...],
+				'keypoints0': d0['keypoints'][None, ...][:, :, :2],
+				'keypoints1': d1['keypoints'][None, ...][:, :, :2],
 				'descriptors0': d0['descriptors'][None, ...],
 				'descriptors1': d1['descriptors'][None, ...],
 				'image_size0': torch.tensor(d0['image_size']).to(self.dev)[None, ...],
@@ -174,19 +267,75 @@ class XFeat(nn.Module):
 			returns:
 				mkpts_0, mkpts_1 -> np.ndarray (N,2) xy coordinate matches from image1 to image2
 		"""
-		if top_k is None: top_k = self.top_k
 		img1 = self.parse_input(img1)
 		img2 = self.parse_input(img2)
 
-		out1 = self.detectAndCompute(img1, top_k=top_k)[0]
-		out2 = self.detectAndCompute(img2, top_k=top_k)[0]
+		out1 = self.detectAndCompute(img1)[0]
+		out2 = self.detectAndCompute(img2)[0]
 
 		idxs0, idxs1 = self.match(out1['descriptors'], out2['descriptors'], min_cossim=min_cossim )
 
-		return out1['keypoints'][idxs0].cpu().numpy(), out2['keypoints'][idxs1].cpu().numpy()
+		return (
+			out1['keypoints'][idxs0].cpu().numpy(), 
+			out2['keypoints'][idxs1].cpu().numpy(),
+			out2
+			)
+	
+	@torch.inference_mode()
+	def match_xfeat_fe(self, data1, data2, min_cossim = -1):
+		"""
+			Simple extractor and MNN matcher.
+			For simplicity it does not support batched mode due to possibly different number of kpts.
+			input:
+				img1 -> torch.Tensor (1,C,H,W) or np.ndarray (H,W,C): grayscale or rgb image.
+				img2 -> torch.Tensor (1,C,H,W) or np.ndarray (H,W,C): grayscale or rgb image.
+				top_k -> int: keep best k features
+			returns:
+				mkpts_0, mkpts_1 -> np.ndarray (N,2) xy coordinate matches from image1 to image2
+		"""
+		# img1 = self.parse_input(img1)
+		# img2 = self.parse_input(img2)
+
+		out1 = self.detectAndComputeFrontEnd(data1)[0]
+		out2 = self.detectAndComputeFrontEnd(data2)[0]
+
+		idxs0, idxs1 = self.match(out1['descriptors'], out2['descriptors'], min_cossim=min_cossim )
+
+		if torch.onnx.is_in_onnx_export():
+			return out1['keypoints'][idxs0], out2['keypoints'][idxs1], out1['keypoints'], out2['keypoints']
+		return (
+			out1['keypoints'][idxs0].cpu().numpy(), 
+			out2['keypoints'][idxs1].cpu().numpy(),
+			out2
+		)
+	
+	@torch.inference_mode()
+	def track_keypoints_xfeat_fe(self, prev_out1, data2, min_cossim = 0.5):
+		"""
+			Simple extractor and MNN matcher.
+			For simplicity it does not support batched mode due to possibly different number of kpts.
+			input:
+				img1 -> torch.Tensor (1,C,H,W) or np.ndarray (H,W,C): grayscale or rgb image.
+				img2 -> torch.Tensor (1,C,H,W) or np.ndarray (H,W,C): grayscale or rgb image.
+				top_k -> int: keep best k features
+			returns:
+				mkpts_0, mkpts_1 -> np.ndarray (N,2) xy coordinate matches from image1 to image2
+		"""
+		# img1 = self.parse_input(img1)
+		# img2 = self.parse_input(img2)
+		out2 = self.detectAndCompute(data2)
+		idxs0, idxs1 = self.match(
+			prev_out1[0]['descriptors'], out2[0]['descriptors'], 
+			min_cossim=min_cossim)
+
+		return (
+				prev_out1[0]['keypoints'][idxs0].cpu().numpy(), 
+				out2[0]['keypoints'][idxs1].cpu().numpy(),
+				out2
+			)
 
 	@torch.inference_mode()
-	def match_xfeat_star(self, im_set1, im_set2, top_k = None):
+	def match_xfeat_star(self, im_set1, im_set2):
 		"""
 			Extracts coarse feats, then match pairs and finally refine matches, currently supports batched mode.
 			input:
@@ -196,25 +345,61 @@ class XFeat(nn.Module):
 			returns:
 				matches -> List[torch.Tensor(N, 4)]: List of size B containing tensor of pairwise matches (x1,y1,x2,y2)
 		"""
-		if top_k is None: top_k = self.top_k
 		im_set1 = self.parse_input(im_set1)
 		im_set2 = self.parse_input(im_set2)
 
 		#Compute coarse feats
-		out1 = self.detectAndComputeDense(im_set1, top_k=top_k)
-		out2 = self.detectAndComputeDense(im_set2, top_k=top_k)
+		out1 = self.detectAndComputeDense(im_set1)
+		out2 = self.detectAndComputeDense(im_set2)
 
 		#Match batches of pairs
-		idxs_list = self.batch_match(out1['descriptors'], out2['descriptors'] )
-		B = len(im_set1)
+		idx0_b, idx1_b = self.batch_match(out1['descriptors'], out2['descriptors'])
+		# print(idx0_b.shape)
+		# print(idx1_b.shape)
 
 		#Refine coarse matches
-		#this part is harder to batch, currently iterate
+		match_mkpts, batch_index = self.refine_matches(out1, out2, idx0_b, idx1_b, fine_conf = 0.25)
+
+		B = im_set1.shape[0]
 		matches = []
 		for b in range(B):
-			matches.append(self.refine_matches(out1, out2, matches = idxs_list, batch_idx=b))
+			matches.append(match_mkpts[batch_index == b, :])
 
 		return matches if B > 1 else (matches[0][:, :2].cpu().numpy(), matches[0][:, 2:].cpu().numpy())
+
+	@torch.inference_mode()
+	def track_keypoints_xfeat_star_fe(self, prev_out1, im_set2):
+		"""
+			Extracts coarse feats, then match pairs and finally refine matches, currently supports batched mode.
+			input:
+				im_set1 -> torch.Tensor(B, C, H, W) or np.ndarray (H,W,C): grayscale or rgb images.
+				im_set2 -> torch.Tensor(B, C, H, W) or np.ndarray (H,W,C): grayscale or rgb images.
+				top_k -> int: keep best k features
+			returns:
+				matches -> List[torch.Tensor(N, 4)]: List of size B containing tensor of pairwise matches (x1,y1,x2,y2)
+		"""
+		#Compute coarse feats
+		out2 = self.detectAndComputeDense(im_set2)
+
+		#Match batches of pairs
+		idx0_b, idx1_b = self.batch_match(
+			prev_out1['descriptors'], out2['descriptors'])
+		# print(idx0_b.shape)
+		# print(idx1_b.shape)
+
+		#Refine coarse matches
+		match_mkpts, batch_index = self.refine_matches(
+			prev_out1, out2, idx0_b, idx1_b)
+
+		B = im_set2.shape[0]
+		matches = []
+		for b in range(B):
+			matches.append(match_mkpts[batch_index == b, :])
+
+		return matches if B > 1 else (
+			matches[0][:, :2].cpu().numpy(), 
+			matches[0][:, 2:].cpu().numpy(), 
+			out2)
 
 	def preprocess_tensor(self, x):
 		""" Guarantee that image is divisible by 32 to avoid aliasing artifacts. """
@@ -264,35 +449,28 @@ class XFeat(nn.Module):
 
 	@torch.inference_mode()
 	def batch_match(self, feats1, feats2, min_cossim = -1):
-		B = len(feats1)
 		cossim = torch.bmm(feats1, feats2.permute(0,2,1))
 		match12 = torch.argmax(cossim, dim=-1)
 		match21 = torch.argmax(cossim.permute(0,2,1), dim=-1)
 
-		idx0 = torch.arange(len(match12[0]), device=match12.device)
+		indices = torch.arange(match12.shape[1], device=feats1.device).unsqueeze(0).repeat(match12.shape[0], 1)
 
-		batched_matches = []
+		mutual = (match21.gather(1, match12) == indices)
 
-		for b in range(B):
-			mutual = match21[b][match12[b]] == idx0
+		if min_cossim > 0:
+			cossim_max, _ = cossim.max(dim=2)
+			good = cossim_max > min_cossim
+			mutual = mutual & good
 
-			if min_cossim > 0:
-				cossim_max, _ = cossim[b].max(dim=1)
-				good = cossim_max > min_cossim
-				idx0_b = idx0[mutual & good]
-				idx1_b = match12[b][mutual & good]
-			else:
-				idx0_b = idx0[mutual]
-				idx1_b = match12[b][mutual]
+		idx0_b = torch.cat([mutual.nonzero()[:, 0, None], indices[mutual][:, None]], axis=1)
+		idx1_b = torch.cat([mutual.nonzero()[:, 0, None], match12[mutual][:, None]], axis=1)
 
-			batched_matches.append((idx0_b, idx1_b))
-
-		return batched_matches
+		return idx0_b, idx1_b
 
 	def subpix_softmax2d(self, heatmaps, temp = 3):
 		N, H, W = heatmaps.shape
 		heatmaps = torch.softmax(temp * heatmaps.view(-1, H*W), -1).view(-1, H, W)
-		x, y = torch.meshgrid(torch.arange(W, device =  heatmaps.device ), torch.arange(H, device =  heatmaps.device ), indexing = 'xy')
+		x, y = torch.meshgrid(torch.arange(H, device =  heatmaps.device ), torch.arange(W, device =  heatmaps.device ), indexing = 'ij')
 		x = x - (W//2)
 		y = y - (H//2)
 
@@ -303,13 +481,20 @@ class XFeat(nn.Module):
 
 		return coords
 
-	def refine_matches(self, d0, d1, matches, batch_idx, fine_conf = 0.25):
-		idx0, idx1 = matches[batch_idx]
-		feats1 = d0['descriptors'][batch_idx][idx0]
-		feats2 = d1['descriptors'][batch_idx][idx1]
-		mkpts_0 = d0['keypoints'][batch_idx][idx0]
-		mkpts_1 = d1['keypoints'][batch_idx][idx1]
-		sc0 = d0['scales'][batch_idx][idx0]
+	def refine_matches(self, d0, d1, idx0_b, idx1_b, fine_conf = 0.5):
+		# if torch.onnx.is_in_onnx_export():
+		# 	# Improve compatibility when opset is less than 14
+		# 	feats1 = d0['descriptors'].flatten(0, 1)[idx0_b[:, 0] * d0['descriptors'].shape[1] + idx0_b[:, 1]]
+		# 	feats2 = d1['descriptors'].flatten(0, 1)[idx1_b[:, 0] * d1['descriptors'].shape[1] + idx1_b[:, 1]]
+		# 	mkpts_0 = d0['keypoints'].flatten(0, 1)[idx0_b[:, 0] * d0['keypoints'].shape[1] + idx0_b[:, 1]]
+		# 	mkpts_1 = d1['keypoints'].flatten(0, 1)[idx1_b[:, 0] * d1['keypoints'].shape[1] + idx1_b[:, 1]]
+		# 	sc0 = d0['scales'].flatten(0, 1)[idx0_b[:, 0] * d0['scales'].shape[1] + idx0_b[:, 1]]
+		# else:
+		feats1 = d0['descriptors'][idx0_b[:, 0], idx0_b[:, 1]]
+		feats2 = d1['descriptors'][idx1_b[:, 0], idx1_b[:, 1]]
+		mkpts_0 = d0['keypoints'][idx0_b[:, 0], idx0_b[:, 1]]
+		mkpts_1 = d1['keypoints'][idx1_b[:, 0], idx1_b[:, 1]]
+		sc0 = d0['scales'][idx0_b[:, 0], idx0_b[:, 1]]
 
 		#Compute fine offsets
 		offsets = self.net.fine_matcher(torch.cat([feats1, feats2],dim=-1))
@@ -321,11 +506,23 @@ class XFeat(nn.Module):
 		mask_good = conf > fine_conf
 		mkpts_0 = mkpts_0[mask_good]
 		mkpts_1 = mkpts_1[mask_good]
+		# feats2 = feats2[mask_good]
+		# sc0 = sc0[mask_good]
 
-		return torch.cat([mkpts_0, mkpts_1], dim=-1)
+		match_mkpts = torch.cat([mkpts_0, mkpts_1], dim=-1)
+		batch_index = idx0_b[mask_good, 0]
+
+		return (match_mkpts, 
+			batch_index, 
+			# {
+			# 	"keypoints": mkpts_1.unsqueeze(0),
+			# 	"descriptors": feats2.unsqueeze(0),
+			# 	"scales": sc0.unsqueeze(0)
+			# }
+		)
 
 	@torch.inference_mode()
-	def match(self, feats1, feats2, min_cossim = 0.82):
+	def match(self, feats1, feats2, min_cossim = 0.95):
 
 		cossim = feats1 @ feats2.t()
 		cossim_t = feats2 @ feats1.t()
@@ -353,10 +550,7 @@ class XFeat(nn.Module):
 		xy = torch.cat([x[..., None],y[..., None]], -1).reshape(-1,2)
 		return xy
 
-	def extractDense(self, x, top_k = 8_000):
-		if top_k < 1:
-			top_k = 100_000_000
-
+	def extractDense(self, x, top_k):
 		x, rh1, rw1 = self.preprocess_tensor(x)
 
 		M1, K1, H1 = self.net(x)
@@ -365,25 +559,51 @@ class XFeat(nn.Module):
 		
 		xy1 = (self.create_xy(_H1, _W1, M1.device) * 8).expand(B,-1,-1)
 
-		M1 = M1.permute(0,2,3,1).reshape(B, -1, C)
-		H1 = H1.permute(0,2,3,1).reshape(B, -1)
+		M1 = M1.permute(0,2,3,1).flatten(1, 2) # B, H*W, C
+		H1 = H1.permute(0,2,3,1).flatten(1) # B, H*W
 
-		_, top_k = torch.topk(H1, k = min(len(H1[0]), top_k), dim=-1)
+		_, top_k = torch.topk(H1, k = min(H1.shape[1], top_k), dim=-1)
 
 		feats = torch.gather( M1, 1, top_k[...,None].expand(-1, -1, 64))
 		mkpts = torch.gather(xy1, 1, top_k[...,None].expand(-1, -1, 2))
+		# if torch.onnx.is_in_onnx_export():
+		# 	# Avoid warning of torch.tensor being treated as a constant when exporting to ONNX
+		# 	mkpts[..., 0] = mkpts[..., 0] * rw1
+		# 	mkpts[..., 1] = mkpts[..., 1] * rh1
+		# else:
+		mkpts = mkpts * torch.tensor([rw1, rh1], device=mkpts.device).view(1,-1)
+
+		return mkpts, feats
+	
+	def extractDenseFrontEnd(self, M1, K1, H1, rh1=1, rw1=1):
+		B, C, _H1, _W1 = M1.shape
+		
+		xy1 = (self.create_xy(_H1, _W1, M1.device) * 8).expand(B,-1,-1)
+
+		M1 = M1.permute(0,2,3,1).flatten(1, 2) # B, H*W, C
+		H1 = H1.permute(0,2,3,1).flatten(1) # B, H*W
+
+		_, top_k = torch.topk(H1, k = min(H1.shape[1], self.top_k), dim=-1)
+
+		feats = torch.gather( M1, 1, top_k[...,None].expand(-1, -1, 64))
+		mkpts = torch.gather(xy1, 1, top_k[...,None].expand(-1, -1, 2))
+		# if torch.onnx.is_in_onnx_export():
+		# 	# Avoid warning of torch.tensor being treated as a constant when exporting to ONNX
+		# 	mkpts[..., 0] = mkpts[..., 0] * rw1
+		# 	mkpts[..., 1] = mkpts[..., 1] * rh1
+		# else:
 		mkpts = mkpts * torch.tensor([rw1, rh1], device=mkpts.device).view(1,-1)
 
 		return mkpts, feats
 
-	def extract_dualscale(self, x, top_k, s1 = 0.6, s2 = 1.3):
+	def extract_dualscale(self, x, s1 = 0.6, s2 = 1.3):
 		x1 = F.interpolate(x, scale_factor=s1, align_corners=False, mode='bilinear')
 		x2 = F.interpolate(x, scale_factor=s2, align_corners=False, mode='bilinear')
 
 		B, _, _, _ = x.shape
 
-		mkpts_1, feats_1 = self.extractDense(x1, int(top_k*0.20))
-		mkpts_2, feats_2 = self.extractDense(x2, int(top_k*0.80))
+		mkpts_1, feats_1 = self.extractDense(x1, int(self.top_k*0.20))
+		mkpts_2, feats_2 = self.extractDense(x2, int(self.top_k*0.80))
 
 		mkpts = torch.cat([mkpts_1/s1, mkpts_2/s2], dim=1)
 		sc1 = torch.ones(mkpts_1.shape[:2], device=mkpts_1.device) * (1/s1)
@@ -401,3 +621,6 @@ class XFeat(nn.Module):
 			x = torch.tensor(x).permute(0,3,1,2)/255
 
 		return x
+	
+	def forward(self, im1, im2):
+		return self.match_xfeat(im1, im2)

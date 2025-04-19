@@ -1,3 +1,9 @@
 [submodule "third_party/ALIKE"]
 	path = third_party/ALIKE
 	url = https://github.com/Shiaoming/ALIKE
+[submodule "third_party/kornia"]
+	path = third_party/kornia
+	url = https://github.com/Raghav-B/kornia
+[submodule "third_party/LightGlue-ONNX"]
+	path = third_party/LightGlue-ONNX
+	url = https://github.com/fabio-sim/LightGlue-ONNX
