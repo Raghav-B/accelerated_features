@@ -21,9 +21,8 @@ def argparser():
     parser.add_argument('--height', type=int, default=480, help='Height of the video capture stream.')
     parser.add_argument('--max_kpts', type=int, default=3_000, help='Maximum number of keypoints.')
     parser.add_argument('--method', type=str, choices=['ORB', 'SIFT', 'XFeat'], default='XFeat', help='Local feature detection method to use.')
-    parser.add_argument('--cam', type=int, default=0, help='Webcam device number.')
+  #  parser.add_argument('--cam', type=int, default=0, help='Webcam device number.')
     return parser.parse_args()
-
 
 class FrameGrabber(threading.Thread):
     def __init__(self, cap):
@@ -39,7 +38,7 @@ class FrameGrabber(threading.Thread):
             if not ret:
                 print("Can't receive frame (stream ended?).")
             self.frame = frame
-            sleep(0.01)
+            sleep(0.05)
 
     def stop(self):
         self.running = False
@@ -73,15 +72,15 @@ def init_method(method, max_kpts):
 class MatchingDemo:
     def __init__(self, args):
         self.args = args
-        self.cap = cv2.VideoCapture(args.cam)
+        self.cap = cv2.VideoCapture('../Trial.webm')#args.cam)
         self.width = args.width
         self.height = args.height
         self.ref_frame = None
         self.ref_precomp = [[],[]]
-        self.corners = [[50, 50], [640-50, 50], [640-50, 480-50], [50, 480-50]]
+        self.corners = [[50, 50], [self.width-50, 50], [self.width-50, self.height-50], [50, self.height-50]]
         self.current_frame = None
         self.H = None
-        self.setup_camera()
+        #self.setup_camera()
 
         #Init frame grabber thread
         self.frame_grabber = FrameGrabber(self.cap)
@@ -157,7 +156,7 @@ class MatchingDemo:
         return warped_points
 
     def create_top_frame(self):
-        top_frame_canvas = np.zeros((480, 1280, 3), dtype=np.uint8)
+        top_frame_canvas = np.zeros((self.height, self.width*2, 3), dtype=np.uint8)
         top_frame = np.hstack((self.ref_frame, self.current_frame))
         color = (3, 186, 252)
         cv2.rectangle(top_frame, (2, 2), (self.width*2-2, self.height-2), color, 5)  # Orange color line as a separator
@@ -167,7 +166,7 @@ class MatchingDemo:
         self.putText(canvas=top_frame_canvas, text="Reference Frame:", org=(10, 30), fontFace=self.font, 
             fontScale=self.font_scale, textColor=(0,0,0), borderColor=color, thickness=1, lineType=self.line_type)
 
-        self.putText(canvas=top_frame_canvas, text="Target Frame:", org=(650, 30), fontFace=self.font, 
+        self.putText(canvas=top_frame_canvas, text="Target Frame:", org=((int)(self.width + 10), 30), fontFace=self.font, 
                     fontScale=self.font_scale,  textColor=(0,0,0), borderColor=color, thickness=1, lineType=self.line_type)
         
         self.draw_quad(top_frame_canvas, self.corners)
