@@ -252,10 +252,10 @@ class MatchingDemo:
             #     'descriptors': descs1[idx0_inliers]        
             # }
         
-        kp1 = [cv2.KeyPoint(p[0],p[1], 5) for p in points1]
+        kp1 = [cv2.KeyPoint(p[0],p[1], 5) for p in points1] # Display the matched points onto the current frame
         self.tracked_kps = {
-            'keypoints': kpts1[idx0],          
-            'descriptors': descs1[idx0]        
+            'keypoints': kpts2[idx1],           # Keep the base reference points the same
+            'descriptors': descs2[idx1]        
         }
 
 
