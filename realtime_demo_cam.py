@@ -82,6 +82,7 @@ class MatchingDemo:
         self.current_frame = None
         self.H = None
         self.frame_list = []
+        self.tracked_kps = [] 
         self.setup_camera()
 
         #Init frame grabber thread
@@ -193,7 +194,7 @@ class MatchingDemo:
 
     def match_and_draw(self, ref_frame, current_frame):
 
-        matches, matches2, good_matches = [], [], []
+        matches, good_matches = [], []
         kp1, kp2 = [], []
         points1, points2 = [], []
 
@@ -206,13 +207,11 @@ class MatchingDemo:
             current = self.ref_precomp
             kpts1, descs1 = current['keypoints'], current['descriptors']
 
-            # Compare the current frame against all previous frames
-            # Then, store matching points on the current frame in a list
-            for i in self.frame_list:
-                kpts2, descs2 = i['keypoints'], i['descriptors']
-                idx0, idx1 = self.method.matcher.match(descs1, descs2, 0.82)
-                points1.append(kpts1[idx0].cpu().numpy())
-                points2.append(kpts2[idx1].cpu().numpy())
+            # Compare the current frame against previously tracked keypoints, checking which match the keypoints in the current image
+            kpts2, descs2 = self.tracked_kps['keypoints'], self.tracked_kps['descriptors']
+            idx0, idx1 = self.method.matcher.match(descs1, descs2, 0.82)
+            points1 = kpts1[idx0].cpu().numpy()
+            points2 = kpts2[idx1].cpu().numpy()
 
         # For SIFT and ORB
         if len(kp1) > 10 and len(kp2) > 10 and self.args.method in ['SIFT', 'ORB']:
@@ -228,31 +227,58 @@ class MatchingDemo:
                     points2[i, :] = kp2[match.trainIdx].pt
 
         # For XFeat
-        # Consolidating  all the matches onto the current frame
-        for idx, i in enumerate(points1):
-            if len(i) > 10:
-                # Find homography
-                self.H, inliers = cv2.findHomography(i, points2[idx], cv2.USAC_MAGSAC, self.ransac_thr, maxIters=700, confidence=0.995)
-                inliers = inliers.flatten() > 0
+        if len(points1) > 10:
+            # Find homography
+            self.H, inliers = cv2.findHomography(points1, points2, cv2.USAC_MAGSAC, self.ransac_thr, maxIters=700, confidence=0.995)
+            inliers = inliers.flatten() > 0
 
-                if inliers.sum() < self.min_inliers:
-                    self.H = None
+            if inliers.sum() < self.min_inliers:
+                self.H = None
 
-                # FOR SIFT AND ORB
-                if self.args.method in ["SIFT", "ORB"]:
-                    good_matches = [m for j,m in enumerate(matches) if inliers[j]]
-                
-                # For XFeat
-                else:
-                    kp1 = [cv2.KeyPoint(p[0],p[1], 5) for p in i[inliers]]
-                    kp2 = [cv2.KeyPoint(p[0],p[1], 5) for p in points2[idx][inliers]]
-                    # Extend good matches
-                    good_matches.extend(kp1)
+            # FOR SIFT AND ORB
+            if self.args.method in ["SIFT", "ORB"]:
+                good_matches = [m for j,m in enumerate(matches) if inliers[j]]
+            
+            # For XFeat
+            else:
+                kp1 = [cv2.KeyPoint(p[0],p[1], 5) for p in points1[inliers]]
+                kp2 = [cv2.KeyPoint(p[0],p[1], 5) for p in points2[inliers]]
 
-            # else:
-            #     matched_frame = np.hstack([ref_frame, current_frame])
 
-        matched_frame = cv2.drawKeypoints(ref_frame, good_matches, 0, (0, 255, 0), None)
+            
+            # idx0_inliers = idx0[inliers]
+            # self.tracked_kps = {
+            #     'keypoints': kpts1[idx0_inliers],          
+            #     'descriptors': descs1[idx0_inliers]        
+            # }
+        
+        kp1 = [cv2.KeyPoint(p[0],p[1], 5) for p in points1]
+        self.tracked_kps = {
+            'keypoints': kpts1[idx0],          
+            'descriptors': descs1[idx0]        
+        }
+
+
+        # Add some unmatched keypoints from the current frame into tracked keypoints for matching in the next frame
+        # all_indices = np.arange(len(kpts1))
+        # matched_indices = idx0.cpu().numpy()
+        # unmatched_mask = ~np.isin(all_indices, matched_indices)
+        # unmatched_indices = all_indices[unmatched_mask]
+
+        # N = 10 - len(self.tracked_kps)
+        # # if len(unmatched_indices) > N:
+        # if N > 0:
+        #     unmatched_indices = unmatched_indices[:N]
+
+        # self.tracked_kps['keypoints'] = torch.cat(
+        #     [self.tracked_kps['keypoints'], kpts1[unmatched_indices]], dim=0)
+        # self.tracked_kps['descriptors'] = torch.cat(
+        #     [self.tracked_kps['descriptors'], descs1[unmatched_indices]], dim=0)
+
+
+
+        good_matches = kp1
+        matched_frame = cv2.drawKeypoints(ref_frame, kp1, 0, (0, 255, 0), None)
         matched_frame = np.hstack([matched_frame, current_frame])
 
         color = (240, 89, 169)
@@ -261,7 +287,7 @@ class MatchingDemo:
         cv2.rectangle(matched_frame, (2, 2), (self.width*2-2, self.height-2), color, 5)
 
         # Adding captions on the top frame canvas
-        self.putText(canvas=matched_frame, text="%s Matches: %d"%(self.args.method, len(good_matches)), org=(10, 30), fontFace=self.font, 
+        self.putText(canvas=matched_frame, text="%s Matches: %d"%(self.args.method, len(kp1)), org=(10, 30), fontFace=self.font, 
             fontScale=self.font_scale, textColor=(0,0,0), borderColor=color, thickness=1, lineType=self.line_type)
         
                 # Adding captions on the top frame canvas
@@ -276,7 +302,7 @@ class MatchingDemo:
         self.ref_precomp = self.method.descriptor.detectAndCompute(self.ref_frame, None) #Cache ref features
         
         # Store current frame details in the dictionary
-        self.frame_list.append(self.ref_precomp)
+        self.tracked_kps = self.ref_precomp
 
         while True:
             if self.current_frame is None:
@@ -295,11 +321,11 @@ class MatchingDemo:
             # Getting the current frame, and adding its detection to the dict
             self.ref_frame = self.current_frame.copy()
             self.ref_precomp = self.method.descriptor.detectAndCompute(self.ref_frame, None) 
-            self.frame_list.append(self.ref_precomp)
+            #self.frame_list.append(self.ref_precomp)
 
             # Remove outdated detections
-            while(len(self.frame_list) > 100 ):
-                self.frame_list.pop(0)
+            # while(len(self.frame_list) > 3 ):
+            #     self.frame_list.pop(0)
 
             self.current_frame = self.frame_grabber.get_last_frame()
 
