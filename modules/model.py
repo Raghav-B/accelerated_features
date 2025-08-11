@@ -139,6 +139,7 @@ class XFeatModel(nn.Module):
 		#dont backprop through normalization
 		with torch.no_grad():
 			# Convert from (1, 320, 320, 3) to (1, 3, 320, 320) if needed
+			# This shape is needed by qtimlvconverter
 			if x.shape[3] == 3:
 				x = x.permute(0, 3, 1, 2)
 			x = x.mean(dim=1, keepdim = True)

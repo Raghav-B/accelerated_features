@@ -67,48 +67,14 @@ class XFeat(nn.Module):
 		B, _, _H1, _W1 = x.shape
         
 		M1, K1, H1 = self.net(x)
-		M1 = F.normalize(M1, dim=1)
-
-		#Convert logits to heatmap and extract kpts
-		K1h = self.get_kpts_heatmap(K1)
-		mkpts = self.NMS(K1h, threshold=detection_threshold, kernel_size=5)
-
-		#Compute reliability scores
-		_nearest = InterpolateSparse2d('nearest')
-		_bilinear = InterpolateSparse2d('bilinear')
-		scores = (_nearest(K1h, mkpts, _H1, _W1) * _bilinear(H1, mkpts, _H1, _W1)).squeeze(-1)
-		scores[torch.all(mkpts == 0, dim=-1)] = -1
-
-		#Select top-k features
-		idxs = torch.argsort(-scores)
-		mkpts_x  = torch.gather(mkpts[...,0], -1, idxs)[:, :top_k]
-		mkpts_y  = torch.gather(mkpts[...,1], -1, idxs)[:, :top_k]
-		mkpts = torch.cat([mkpts_x[...,None], mkpts_y[...,None]], dim=-1)
-		scores = torch.gather(scores, -1, idxs)[:, :top_k]
-
-		#Interpolate descriptors at kpts positions
-		feats = self.interpolator(M1, mkpts, H = _H1, W = _W1)
-
-		#L2-Normalize
-		feats = F.normalize(feats, dim=-1)
-
-		#Correct kpt scale
-		mkpts = mkpts * torch.tensor([rw1,rh1], device=mkpts.device).view(1, 1, -1)
-
-		# valid = scores > 0
-		# return [  
-		# 		   {'keypoints': mkpts[b][valid[b]],
-		# 			'scores': scores[b][valid[b]],
-		# 			'descriptors': feats[b][valid[b]]} for b in range(B) 
-		# 	   ]
-	
-		pts = torch.cat((mkpts, scores.unsqueeze(-1)), dim=-1)
-
-		valid = scores > 0
-		return [  
-				   {'keypoints': pts[b][valid[b]],
-					'descriptors': feats[b][valid[b]]} for b in range(B) 
-			   ]
+		return self.detectAndComputeFrontEnd(
+			{
+				"M1": M1,
+				"K1": K1,
+				"H1": H1
+			},
+			rh1=rh1, rw1=rw1, _H1=_H1, _W1=_W1
+		)
 	
 	@torch.inference_mode()
 	def detectAndComputeFrontEnd(self, data, rh1=1, rw1=1, _H1=640, _W1=640):
