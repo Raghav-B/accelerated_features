@@ -115,8 +115,14 @@ class XFeatModel(nn.Module):
 			Unfolds tensor in 2D with desired ws (window size) and concat the channels
 		"""
 		B, C, H, W = x.shape
-		x = x.unfold(2,  ws , ws).unfold(3, ws,ws)                             \
-			.reshape(B, C, H//ws, W//ws, ws**2)
+		# The current ONNX export does not support dynamic shape unfold
+		if torch.onnx.is_in_onnx_export():
+			x = x[..., :x.shape[2]//ws*ws, :x.shape[3]//ws*ws]
+			B, C, H, W = x.shape
+			return torch.reshape(x, (B, C, H//ws, ws, W//ws, ws)).permute(0, 1, 3, 5, 2, 4).flatten(1, 3)
+		else:
+			x = x.unfold(2,  ws , ws).unfold(3, ws, ws)
+		x = x.reshape(B, C, H//ws, W//ws, ws**2)
 		return x.permute(0, 1, 4, 2, 3).reshape(B, -1, H//ws, W//ws)
 
 
@@ -132,6 +138,10 @@ class XFeatModel(nn.Module):
 		"""
 		#dont backprop through normalization
 		with torch.no_grad():
+			# Convert from (1, 320, 320, 3) to (1, 3, 320, 320) if needed
+			# This shape is needed by qtimlvconverter
+			if x.shape[3] == 3:
+				x = x.permute(0, 3, 1, 2)
 			x = x.mean(dim=1, keepdim = True)
 			x = self.norm(x)
 
