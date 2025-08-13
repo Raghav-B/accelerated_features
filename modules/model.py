@@ -125,30 +125,34 @@ class XFeatModel(nn.Module):
 			input:
 				x -> torch.Tensor(B, C, H, W) grayscale or rgb images
 			return:
-				feats     ->  torch.Tensor(B, 64, H/8, W/8) dense local features
-				keypoints ->  torch.Tensor(B, 65, H/8, W/8) keypoint logit map
+				feats     ->  torch.Tensor(B, H/8, W/8, 64) dense local features
+				keypoints ->  torch.Tensor(B, H/8, W/8, 65) keypoint logit map
 				heatmap   ->  torch.Tensor(B,  1, H/8, W/8) reliability map
 
 		"""
 		#dont backprop through normalization
 		with torch.no_grad():
 			x = x.mean(dim=1, keepdim = True)
-			x = self.norm(x)
+			# x = self.norm(x)
 
 		#main backbone
-		x1 = self.block1(x)
-		x2 = self.block2(x1 + self.skip1(x))
-		x3 = self.block3(x2)
-		x4 = self.block4(x3)
-		x5 = self.block5(x4)
+		x1 = self.block1(x)								# x1: [B, 24, H/4, W/4]
+		x2 = self.block2(x1 + self.skip1(x))				# x2: [B, 24, H/4, W/4]
+		x3 = self.block3(x2)							# x3: [B, 64, H/8, W/8]
+		x4 = self.block4(x3)							# x4: [B, 64, H/16, W/16]
+		x5 = self.block5(x4)							# x5: [B, 64, H/32, W/32]
 
 		#pyramid fusion
-		x4 = F.interpolate(x4, (x3.shape[-2], x3.shape[-1]), mode='bilinear')
-		x5 = F.interpolate(x5, (x3.shape[-2], x3.shape[-1]), mode='bilinear')
-		feats = self.block_fusion( x3 + x4 + x5 )
+		x4 = F.interpolate(x4, (x3.shape[-2], x3.shape[-1]), mode='bilinear')  # x4: [B, 64, H/8, W/8]
+		x5 = F.interpolate(x5, (x3.shape[-2], x3.shape[-1]), mode='bilinear')  # x5: [B, 64, H/8, W/8]
+		feats = self.block_fusion( x3 + x4 + x5 )  # feats: [B, 64, H/8, W/8]
 
 		#heads
 		heatmap = self.heatmap_head(feats) # Reliability map
 		keypoints = self.keypoint_head(self._unfold2d(x, ws=8)) #Keypoint map logits
 
-		return feats, keypoints, heatmap
+		# convert feats and keypoints from [B, C, H, W] to [B, H, W, C]
+		out_feats = feats.permute(0, 2, 3, 1)
+		out_keypoints = keypoints.permute(0, 2, 3, 1)
+
+		return out_feats, out_keypoints, heatmap
