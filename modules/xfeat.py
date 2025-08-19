@@ -99,6 +99,8 @@ class XFeat(nn.Module):
 		K1h = self.get_kpts_heatmap(K1)
 		mkpts = self.NMS(K1h, threshold=0.05, kernel_size=5)
 
+		filtered_kpts = mkpts
+
 		#Compute reliability scores
 		_nearest = InterpolateSparse2d('nearest')
 		_bilinear = InterpolateSparse2d('bilinear')
@@ -125,7 +127,11 @@ class XFeat(nn.Module):
 		valid = scores > 0
 		return [  
 				   {'keypoints': pts[b][valid[b]],
-					'descriptors': feats[b][valid[b]]} for b in range(B) 
+					# 'scores': scores[b][valid[b]],
+					'descriptors': feats[b][valid[b]],
+					'heatmap': K1h,
+					'logits': K1,
+					'filtered_salient': filtered_kpts} for b in range(B) 
 			   ]
 	
 

@@ -21,8 +21,9 @@ def argparser():
     parser.add_argument('--height', type=int, default=480, help='Height of the video capture stream.')
     parser.add_argument('--max_kpts', type=int, default=3_000, help='Maximum number of keypoints.')
     parser.add_argument('--method', type=str, choices=['ORB', 'SIFT', 'XFeat'], default='XFeat', help='Local feature detection method to use.')
-  #  parser.add_argument('--cam', type=int, default=0, help='Webcam device number.')
+    parser.add_argument('--cam', type=int, default=0, help='Webcam device number.')
     return parser.parse_args()
+
 
 class FrameGrabber(threading.Thread):
     def __init__(self, cap):
@@ -38,7 +39,7 @@ class FrameGrabber(threading.Thread):
             if not ret:
                 print("Can't receive frame (stream ended?).")
             self.frame = frame
-            sleep(0.05)
+            sleep(0.01)
 
     def stop(self):
         self.running = False
@@ -72,15 +73,17 @@ def init_method(method, max_kpts):
 class MatchingDemo:
     def __init__(self, args):
         self.args = args
-        self.cap = cv2.VideoCapture('../Trial.webm')#args.cam)
+        self.cap = cv2.VideoCapture(args.cam)
         self.width = args.width
         self.height = args.height
         self.ref_frame = None
         self.ref_precomp = [[],[]]
-        self.corners = [[50, 50], [self.width-50, 50], [self.width-50, self.height-50], [50, self.height-50]]
+        self.corners = [[50, 50], [640-50, 50], [640-50, 480-50], [50, 480-50]]
         self.current_frame = None
         self.H = None
-        #self.setup_camera()
+        self.frame_list = []
+        self.tracked_kps = [] 
+        self.setup_camera()
 
         #Init frame grabber thread
         self.frame_grabber = FrameGrabber(self.cap)
@@ -156,7 +159,7 @@ class MatchingDemo:
         return warped_points
 
     def create_top_frame(self):
-        top_frame_canvas = np.zeros((self.height, self.width*2, 3), dtype=np.uint8)
+        top_frame_canvas = np.zeros((480, 1280, 3), dtype=np.uint8)
         top_frame = np.hstack((self.ref_frame, self.current_frame))
         color = (3, 186, 252)
         cv2.rectangle(top_frame, (2, 2), (self.width*2-2, self.height-2), color, 5)  # Orange color line as a separator
@@ -166,7 +169,7 @@ class MatchingDemo:
         self.putText(canvas=top_frame_canvas, text="Reference Frame:", org=(10, 30), fontFace=self.font, 
             fontScale=self.font_scale, textColor=(0,0,0), borderColor=color, thickness=1, lineType=self.line_type)
 
-        self.putText(canvas=top_frame_canvas, text="Target Frame:", org=((int)(self.width + 10), 30), fontFace=self.font, 
+        self.putText(canvas=top_frame_canvas, text="Target Frame:", org=(650, 30), fontFace=self.font, 
                     fontScale=self.font_scale,  textColor=(0,0,0), borderColor=color, thickness=1, lineType=self.line_type)
         
         self.draw_quad(top_frame_canvas, self.corners)
@@ -200,13 +203,17 @@ class MatchingDemo:
             kp1, des1 = self.ref_precomp
             kp2, des2 = self.method.descriptor.detectAndCompute(current_frame, None)
         else:
-            current = self.method.descriptor.detectAndCompute(current_frame)
-            kpts1, descs1 = self.ref_precomp['keypoints'], self.ref_precomp['descriptors']
-            kpts2, descs2 = current['keypoints'], current['descriptors']
+            # Get the keypoints and descriptors of the current frame
+            current = self.ref_precomp
+            kpts1, descs1 = current['keypoints'], current['descriptors']
+
+            # Compare the current frame against previously tracked keypoints, checking which match the keypoints in the current image
+            kpts2, descs2 = self.tracked_kps['keypoints'], self.tracked_kps['descriptors']
             idx0, idx1 = self.method.matcher.match(descs1, descs2, 0.82)
             points1 = kpts1[idx0].cpu().numpy()
             points2 = kpts2[idx1].cpu().numpy()
 
+        # For SIFT and ORB
         if len(kp1) > 10 and len(kp2) > 10 and self.args.method in ['SIFT', 'ORB']:
             # Match descriptors
             matches = self.method.matcher.match(des1, des2)
@@ -219,7 +226,8 @@ class MatchingDemo:
                     points1[i, :] = kp1[match.queryIdx].pt
                     points2[i, :] = kp2[match.trainIdx].pt
 
-        if len(points1) > 10 and len(points2) > 10:
+        # For XFeat
+        if len(points1) > 10:
             # Find homography
             self.H, inliers = cv2.findHomography(points1, points2, cv2.USAC_MAGSAC, self.ransac_thr, maxIters=700, confidence=0.995)
             inliers = inliers.flatten() > 0
@@ -227,18 +235,51 @@ class MatchingDemo:
             if inliers.sum() < self.min_inliers:
                 self.H = None
 
+            # FOR SIFT AND ORB
             if self.args.method in ["SIFT", "ORB"]:
-                good_matches = [m for i,m in enumerate(matches) if inliers[i]]
+                good_matches = [m for j,m in enumerate(matches) if inliers[j]]
+            
+            # For XFeat
             else:
                 kp1 = [cv2.KeyPoint(p[0],p[1], 5) for p in points1[inliers]]
                 kp2 = [cv2.KeyPoint(p[0],p[1], 5) for p in points2[inliers]]
-                good_matches = [cv2.DMatch(i,i,0) for i in range(len(kp1))]
 
-            # Draw matches
-            matched_frame = cv2.drawMatches(ref_frame, kp1, current_frame, kp2, good_matches, None, matchColor=(0, 200, 0), flags=2)
+
             
-        else:
-            matched_frame = np.hstack([ref_frame, current_frame])
+            # idx0_inliers = idx0[inliers]
+            # self.tracked_kps = {
+            #     'keypoints': kpts1[idx0_inliers],          
+            #     'descriptors': descs1[idx0_inliers]        
+            # }
+        
+        kp1 = [cv2.KeyPoint(p[0],p[1], 5) for p in points1] # Display the matched points onto the current frame
+        self.tracked_kps = {
+            'keypoints': kpts2[idx1],           # Keep the base reference points the same
+            'descriptors': descs2[idx1]        
+        }
+
+
+        # Add some unmatched keypoints from the current frame into tracked keypoints for matching in the next frame
+        # all_indices = np.arange(len(kpts1))
+        # matched_indices = idx0.cpu().numpy()
+        # unmatched_mask = ~np.isin(all_indices, matched_indices)
+        # unmatched_indices = all_indices[unmatched_mask]
+
+        # N = 10 - len(self.tracked_kps)
+        # # if len(unmatched_indices) > N:
+        # if N > 0:
+        #     unmatched_indices = unmatched_indices[:N]
+
+        # self.tracked_kps['keypoints'] = torch.cat(
+        #     [self.tracked_kps['keypoints'], kpts1[unmatched_indices]], dim=0)
+        # self.tracked_kps['descriptors'] = torch.cat(
+        #     [self.tracked_kps['descriptors'], descs1[unmatched_indices]], dim=0)
+
+
+
+        good_matches = kp1
+        matched_frame = cv2.drawKeypoints(ref_frame, kp1, 0, (0, 255, 0), None)
+        matched_frame = np.hstack([matched_frame, current_frame])
 
         color = (240, 89, 169)
 
@@ -246,7 +287,7 @@ class MatchingDemo:
         cv2.rectangle(matched_frame, (2, 2), (self.width*2-2, self.height-2), color, 5)
 
         # Adding captions on the top frame canvas
-        self.putText(canvas=matched_frame, text="%s Matches: %d"%(self.args.method, len(good_matches)), org=(10, 30), fontFace=self.font, 
+        self.putText(canvas=matched_frame, text="%s Matches: %d"%(self.args.method, len(kp1)), org=(10, 30), fontFace=self.font, 
             fontScale=self.font_scale, textColor=(0,0,0), borderColor=color, thickness=1, lineType=self.line_type)
         
                 # Adding captions on the top frame canvas
@@ -255,10 +296,13 @@ class MatchingDemo:
 
         return matched_frame
 
-    def main_loop(self):
+    def main_loop(self):        
         self.current_frame = self.frame_grabber.get_last_frame()
         self.ref_frame = self.current_frame.copy()
         self.ref_precomp = self.method.descriptor.detectAndCompute(self.ref_frame, None) #Cache ref features
+        
+        # Store current frame details in the dictionary
+        self.tracked_kps = self.ref_precomp
 
         while True:
             if self.current_frame is None:
@@ -270,9 +314,18 @@ class MatchingDemo:
             key = cv2.waitKey(1)
             if key == ord('q'):
                 break
-            elif key == ord('s'):
-                self.ref_frame = self.current_frame.copy()  # Update reference frame
-                self.ref_precomp = self.method.descriptor.detectAndCompute(self.ref_frame, None) #Cache ref features
+            # elif key == ord('s'):
+            #     self.ref_frame = self.current_frame.copy()  # Update reference frame
+            #     self.ref_precomp = self.method.descriptor.detectAndCompute(self.ref_frame, None) #Cache ref features
+
+            # Getting the current frame, and adding its detection to the dict
+            self.ref_frame = self.current_frame.copy()
+            self.ref_precomp = self.method.descriptor.detectAndCompute(self.ref_frame, None) 
+            #self.frame_list.append(self.ref_precomp)
+
+            # Remove outdated detections
+            # while(len(self.frame_list) > 3 ):
+            #     self.frame_list.pop(0)
 
             self.current_frame = self.frame_grabber.get_last_frame()
 
