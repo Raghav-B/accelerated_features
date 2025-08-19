@@ -2,6 +2,7 @@ import qai_hub as hub
 import os
 
 # Step 1: Using onnx model from https://github.com/meyiao/xfeatc/blob/main/model/xfeat_640x640.onnx
+# Checking the source code, this also skips the frontend parts (NMS and all)
 onnx_model_path = "./xfeat_640x640.onnx"
 if not os.path.exists(onnx_model_path):
     raise FileNotFoundError(f"ONNX file not found")
